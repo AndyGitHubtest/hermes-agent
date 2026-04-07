@@ -409,19 +409,50 @@ class L009_ResultOrientedRule(BaseRule):
         return RuleResult(rule_id=self.rule_id, passed=True, details=f"产生 {len(concrete_actions)} 个具体行动")
 
 
+# ──────────────────────────────────────────────
+# 反模式关键词库 (Anti-Hallucination Keywords)
+# ──────────────────────────────────────────────
+
+ANTI_HALLUCINATION_KEYWORDS = [
+    "应该是", "一般来说", "可能是", "大概率", "通常情况下",
+    "据我所知", "根据经验", "通常是", "往往是", "大概率是",
+    "应该是这样的", "我认为是", "感觉是", "看起来是", "似乎",
+    "可能", "大概", "也许", "应该没问题", "应该可以",
+    "should be", "generally", "probably", "typically", "might be",
+    "usually", "I think", "seems like", "appears to",
+]
+
+
 class L010_ZeroHallucinationRule(BaseRule):
     """
-    铁律10: 零幻觉铁律
+    铁律10: 零幻觉铁律（反幻觉最高规则）
+
     严禁：编造事实/状态/结果/数据/工具行为/文件内容。
     真实性永远高于流畅性。
+
+    核心原则：
+    - 没有证据的回答 = 垃圾信息
+    - 所有"看起来对"的内容，必须默认为"可能是错的"
+    - 不验证的结果，不允许进入下一步流程
+    - 模型不会负责正确性，你必须负责
+    - 如果系统允许幻觉存在，那么系统本身就是错误的
+
+    反模式检测：
+    - 推测性语言（"应该是"、"一般来说"、"可能是"）
+    - 无来源声明
+    - 用解释代替执行
+    - 用经验代替数据
     """
     rule_id = "L010"
     rule_name = "零幻觉铁律"
     severity = Severity.P0_CRITICAL
     category = RuleCategory.EXECUTION
-    description = "检查输出中是否有未验证的事实声明"
+    description = "检查输出中是否有未验证的事实声明和推测性语言"
 
     def check(self, context: Dict[str, Any]) -> RuleResult:
+        violations = []
+
+        # 检查 1: 未验证声明
         unverified_claims = context.get("unverified_claims", [])
         verified_sources = context.get("verified_sources", {})
 
@@ -432,20 +463,66 @@ class L010_ZeroHallucinationRule(BaseRule):
                 unverified.append(claim)
 
         if unverified:
+            violations.append(
+                f"输出包含 {len(unverified)} 条未验证声明: {unverified[:3]}"
+            )
+
+        # 检查 2: 推测性语言
+        response_text = context.get("response", "")
+        found_speculation = []
+        for keyword in ANTI_HALLUCINATION_KEYWORDS:
+            if keyword.lower() in response_text.lower():
+                found_speculation.append(keyword)
+
+        if found_speculation:
+            violations.append(
+                f"检测到 {len(found_speculation)} 个推测性词汇: {found_speculation[:5]}"
+            )
+
+        # 检查 3: 无执行过程直接给结论
+        has_execution = context.get("has_execution", False)
+        has_conclusion = context.get("has_conclusion", False)
+        if has_conclusion and not has_execution:
+            violations.append("有结论但无执行过程（直接用语言替代执行）")
+
+        # 检查 4: 无数据来源
+        has_data_source = context.get("has_data_source", False)
+        if has_conclusion and not has_data_source:
+            violations.append("有结论但未明确数据来源")
+
+        # 检查 5: 用解释代替结果
+        explanation_only = context.get("explanation_only", False)
+        if explanation_only:
+            violations.append("纯解释性输出，无执行结果或数据证明")
+
+        if violations:
             violation = RuleViolation(
                 rule_id=self.rule_id,
                 rule_name=self.rule_name,
                 severity=self.severity,
                 category=self.category,
-                message=f"输出包含 {len(unverified)} 条未验证声明",
-                context={"unverified": unverified[:5]},  # 最多显示5条
+                message="；\n".join(violations),
+                context={
+                    "unverified_count": len(unverified),
+                    "speculation_keywords": found_speculation[:5],
+                    "has_execution": has_execution,
+                    "has_data_source": has_data_source,
+                    "explanation_only": explanation_only,
+                },
                 action_taken="blocked",
-                recovery_path="所有事实必须来源可查: 工具验证 > 代码确认 > 文档引用 > 用户确认"
+                recovery_path=(
+                    "反幻觉铁律：\n"
+                    "1. 无证据不输出（没有数据/执行/来源 → 沉默）\n"
+                    "2. 所有结论必须可追溯（数据来源→执行过程→原始结果）\n"
+                    "3. 禁止推测（'应该是'/'一般来说'/'可能是' = 错误）\n"
+                    "4. 必须执行验证（运行代码/查询数据/读取文件）\n"
+                    "5. 结果优先于解释（只接受执行结果和数据证明）"
+                )
             )
             return RuleResult(rule_id=self.rule_id, passed=False, violation=violation,
-                            details=f"{len(unverified)} 条未验证声明")
+                            details=f"{len(violations)} 项幻觉检查失败")
 
-        return RuleResult(rule_id=self.rule_id, passed=True, details="所有声明已验证")
+        return RuleResult(rule_id=self.rule_id, passed=True, details="零幻觉检查通过")
 
 
 class L011_SelfVerificationRule(BaseRule):
